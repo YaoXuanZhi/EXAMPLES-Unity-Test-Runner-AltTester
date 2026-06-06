@@ -162,6 +162,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
     try {
         const result = await callUnityRpc(name, args || {});
         
+        // ListTools 返回完整 JSON（含 tools 数组），http-server 会解析
+        if (name === "ListTools") {
+            return {
+                content: [{ type: "text", text: JSON.stringify(result) }]
+            };
+        }
+        
         if (result && result.success) {
             return {
                 content: [{ type: "text", text: result.message || "Success" }]

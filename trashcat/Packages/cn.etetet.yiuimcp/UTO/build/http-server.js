@@ -292,25 +292,32 @@ app.post('/batch', async (req, res) => {
     });
 });
 /**
- * 获取可用工具列表
+ * 获取可用工具列表（动态从 Unity MCP 查询）
+ * 只在 MCP Client 就绪时查询 Unity，否则返回空列表
  */
 app.get('/tools', async (req, res) => {
     try {
-        res.json({
-            success: true,
-            tools: [
-                { name: 'Compile', description: '智能编译 Unity 项目' },
-                { name: 'Log', description: '写入日志到 Unity Console' },
-                { name: 'LogError', description: '写入错误日志到 Unity Console' }
-            ]
-        });
+        const result = await mcp_client_1.mcpClient.callTool("ListTools", {});
+        if (result.content && Array.isArray(result.content)) {
+            const text = result.content.map((c) => c.text).join('\n');
+            const parsed = JSON.parse(text);
+            if (parsed && parsed.tools && Array.isArray(parsed.tools)) {
+                console.log(`[HTTP] /tools 返回 ${parsed.tools.length} 个工具`);
+                return res.json({
+                    success: true,
+                    tools: parsed.tools
+                });
+            }
+        }
     }
     catch (error) {
-        res.json({
-            success: false,
-            error: error.message
-        });
+        console.log(`[HTTP] /tools 查询 Unity 失败，返回空列表: ${error.message}`);
     }
+    // Fallback: Unity 不可达时返回空列表
+    res.json({
+        success: true,
+        tools: []
+    });
 });
 /**
  * 启动 HTTP Server
