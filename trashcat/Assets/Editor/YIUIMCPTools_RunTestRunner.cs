@@ -41,10 +41,10 @@ namespace YIUIFramework.Editor.MCP
     /// YIUIMCP运行Test Runner的工具
     /// 使用 YIUIMCPTestRunnerBridge 执行测试，桥接层跨越 Domain Reload 持久化结果
     ///
-    /// ⚠ 启动即返回，不阻塞 RPC 管线
-    /// 使用 GetTestResult 工具查看测试进度和结果
+    /// 启动后立即返回，不阻塞 RPC 管线。
+    /// 测试完成后使用 WaitForTestResult 阻塞等待最终结果。
     /// </summary>
-    [YIUIMCPTools("RunTestRunner", "运行Unity Test Runner测试，启动后立即返回。使用 GetTestResult 查看结果")]
+    [YIUIMCPTools("RunTestRunner", "运行Unity Test Runner测试，启动后立即返回。使用 WaitForTestResult 等待完成")]
     public class YIUIMCPTools_RunTestRunner : YIUIMCPBaseExecutor<RunTestRunnerParams>
     {
         [MenuItem("Tools/Run PlayMode Tests", priority = 100)]
@@ -83,7 +83,7 @@ namespace YIUIFramework.Editor.MCP
                 $"模式: {testModeLabel}\n" +
                 $"结果文件: {resultFilePath}\n" +
                 $"---\n" +
-                $"测试运行中。使用 GetTestResult 查看结果，或查看 Unity Console 日志。");
+                $"测试运行中。使用 GetTestResult 查看实时进度，或使用 WaitForTestResult 等待完成并获取结果。");
         }
     }
 }

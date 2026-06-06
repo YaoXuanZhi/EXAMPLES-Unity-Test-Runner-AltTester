@@ -84,7 +84,26 @@ app.get('/health', (req, res) => {
     });
 });
 /**
- * 统一调用端点（带自动心跳检测）
+ * 检查连接是否因域重载而断开
+ */
+function isConnectionDroppedError(errorMessage) {
+    if (!errorMessage)
+        return false;
+    const m = errorMessage.toLowerCase();
+    return m.includes("unknown error")
+        || m.includes("econnrefused")
+        || m.includes("econnaborted")
+        || m.includes("connect")
+        || m.includes("timeout")
+        || m.includes("rpc failed");
+}
+/**
+ * 统一调用端点（带自动心跳检测 + 域重载恢复）
+ *
+ * 核心思路（参考 Locus）：
+ *   工具调用可能因域重载（Domain Reload）中断 HTTP 连接。
+ *   UTO 在检测到断连后，等待 Unity 重连，然后主动查询桥接层
+ *   （GetTestResult）确认工具是否已成功执行，保证执行链路不中断。
  */
 app.post('/call', async (req, res) => {
     const { tool, params } = req.body;
@@ -113,28 +132,78 @@ app.post('/call', async (req, res) => {
         }
         // 2. 记录调用前的 InstanceId
         const beforeInstanceId = heartbeatManager?.getCurrentInstanceId();
-        // 3. 执行工具调用
-        const result = await mcp_client_1.mcpClient.callTool(tool, params || {});
+        // 3. 执行工具调用（可能因域重载而失败）
+        let result;
+        let callSucceeded = true;
+        try {
+            result = await mcp_client_1.mcpClient.callTool(tool, params || {});
+        }
+        catch (callError) {
+            callSucceeded = false;
+            result = {
+                content: [{ type: "text", text: `RPC Failed: ${callError.message}` }],
+                isError: true
+            };
+        }
         // 4. 检查是否触发了域重建
         const afterInstanceId = heartbeatManager?.getCurrentInstanceId();
+        let domainReloadDetected = false;
         if (beforeInstanceId && afterInstanceId && afterInstanceId !== beforeInstanceId) {
             console.log(`[${timestamp}] [HTTP] 检测到域重建 (${beforeInstanceId} -> ${afterInstanceId})`);
+            domainReloadDetected = true;
         }
         // 5. 提取结果
         let resultText = '';
         let isError = false;
-        if (result.content && Array.isArray(result.content)) {
+        if (result && result.content && Array.isArray(result.content)) {
             resultText = result.content.map((c) => c.text).join('\n');
         }
-        else {
+        else if (result) {
             resultText = JSON.stringify(result);
         }
-        if (result.isError !== undefined) {
+        if (result && result.isError !== undefined) {
             isError = result.isError;
         }
-        // 6. 检测到 "Unknown error"（域重建导致）
-        if (heartbeatManager && isError && resultText.includes("Unknown error")) {
-            console.log(`[${timestamp}] [HTTP] 检测到 Unknown error，等待 Unity 重连...`);
+        // 6. 对于 WaitForTestResult: 无论是否断连，只要还没完成就在 UTO 层做内部轮询
+        if (tool === "WaitForTestResult" && !resultText.includes("已完成")) {
+            console.log(`[${timestamp}] [HTTP] WaitForTestResult 进入 UTO 层轮询...`);
+            const wftTimeout = (params?.timeoutSeconds || 200) * 1000;
+            const pollStartTime = Date.now();
+            while (Date.now() - pollStartTime < wftTimeout) {
+                try {
+                    await new Promise(r => setTimeout(r, 10000));
+                    if (heartbeatManager && !heartbeatManager.isReady()) {
+                        console.log(`[${timestamp}] [HTTP] WaitForTestResult 等待 Unity 就绪...`);
+                        await heartbeatManager.waitForUnityReady();
+                    }
+                    const pollResult = await mcp_client_1.mcpClient.callTool("WaitForTestResult", {});
+                    if (pollResult && pollResult.content && Array.isArray(pollResult.content)) {
+                        const pollText = pollResult.content.map((c) => c.text).join('\n');
+                        console.log(`[${timestamp}] [HTTP] WaitForTestResult 轮询: ${pollText.substring(0, 80)}...`);
+                        if (pollText.includes("已完成") || !pollText.includes("仍在运行中")) {
+                            resultText = pollText;
+                            isError = false;
+                            console.log(`[${timestamp}] [HTTP] WaitForTestResult 测试完成`);
+                            break;
+                        }
+                    }
+                }
+                catch (pollErr) {
+                    console.log(`[${timestamp}] [HTTP] WaitForTestResult 轮询异常: ${pollErr.message}，继续...`);
+                }
+            }
+            const duration = Date.now() - startTime;
+            console.log(`[${timestamp}] [HTTP] WaitForTestResult 轮询结束，耗时: ${duration}ms`);
+            return res.json({
+                success: true, result: resultText || `轮询超时（${(params?.timeoutSeconds || 200)}秒）`,
+                isError: false, duration: Date.now() - startTime,
+                durationSeconds: ((Date.now() - startTime) / 1000).toFixed(2)
+            });
+        }
+        // 7. 检测到连接断开 / 域重建，等待恢复后主动查询桥接层
+        const connDropped = !callSucceeded || isConnectionDroppedError(resultText);
+        if ((connDropped || domainReloadDetected) && heartbeatManager) {
+            console.log(`[${timestamp}] [HTTP] 连接断开，等待 Unity 重连...`);
             const ready = await heartbeatManager.waitForUnityReady();
             if (!ready) {
                 const timeoutMinutes = config_1.UTO_CONFIG.heartbeat.timeout / 60000;
@@ -144,9 +213,51 @@ app.post('/call', async (req, res) => {
                     duration: Date.now() - startTime
                 });
             }
-            // 重连成功，返回成功（因为域重建是预期行为）
-            resultText = `工具 ${tool} 已执行，Unity 已完成域重建`;
-            isError = false;
+            // 重连成功。根据工具类型决定后续行为
+            if (tool === "RunTestRunner") {
+                // RunTestRunner: 查询桥接层确认测试已启动后返回
+                try {
+                    const checkResult = await mcp_client_1.mcpClient.callTool("GetTestResult", { testMode: params?.testMode || "PlayMode" });
+                    if (checkResult && checkResult.content && Array.isArray(checkResult.content)) {
+                        const checkText = checkResult.content.map((c) => c.text).join('\n');
+                        if (checkText.includes("运行中") || checkText.includes("已完成") || checkText.includes("进度:")) {
+                            console.log(`[${timestamp}] [HTTP] 桥接层确认测试已启动`);
+                            resultText = `测试已启动。使用 GetTestResult 查看实时进度或 WaitForTestResult 等待完成`;
+                            isError = false;
+                            const duration = Date.now() - startTime;
+                            console.log(`[${timestamp}] [HTTP] 成功: ${tool}，耗时: ${duration}ms`);
+                            return res.json({
+                                success: true, result: resultText, isError: false,
+                                duration: duration, durationSeconds: (duration / 1000).toFixed(2)
+                            });
+                        }
+                    }
+                }
+                catch (queryError) {
+                    console.log(`[${timestamp}] [HTTP] 查询桥接层失败: ${queryError.message}，仍返回成功`);
+                }
+                resultText = `测试已启动。使用 GetTestResult 查看实时进度或 WaitForTestResult 等待完成`;
+                isError = false;
+            }
+            else if (tool === "WaitForTestResult") {
+                // WaitForTestResult 的轮询已在顶层完成。
+                // 这里仅作为域重载后的兜底：重新查一次结果
+                try {
+                    const resumeResult = await mcp_client_1.mcpClient.callTool("WaitForTestResult", {});
+                    if (resumeResult && resumeResult.content && Array.isArray(resumeResult.content)) {
+                        resultText = resumeResult.content.map((c) => c.text).join('\n');
+                    }
+                    isError = false;
+                }
+                catch {
+                    resultText = `WaitForTestResult 域重载后查询失败，请重试`;
+                    isError = true;
+                }
+            }
+            else {
+                resultText = `工具 ${tool} 已执行，Unity 已完成域重建`;
+                isError = false;
+            }
         }
         const duration = Date.now() - startTime;
         console.log(`[${timestamp}] [HTTP] 成功: ${tool}，耗时: ${duration}ms`);

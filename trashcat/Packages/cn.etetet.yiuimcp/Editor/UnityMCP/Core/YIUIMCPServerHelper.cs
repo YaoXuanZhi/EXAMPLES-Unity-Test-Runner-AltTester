@@ -242,8 +242,9 @@ namespace YIUIFramework.Editor.MCP
             {
                 case PlayModeStateChange.ExitingEditMode:
                 case PlayModeStateChange.ExitingPlayMode:
+                    // 不在此停服 — 域重载由 OnBeforeAssemblyReload 处理
+                    // 过早停服会中断正在进行的 RPC 响应（如 RunTestRunner 的结果回写）
                     _checkingHealth = false;
-                    OnStopServer();
                     break;
                 case PlayModeStateChange.EnteredEditMode:
                 case PlayModeStateChange.EnteredPlayMode:
