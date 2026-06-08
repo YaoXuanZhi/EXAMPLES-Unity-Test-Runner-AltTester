@@ -13,6 +13,20 @@ description: 面向嵌入 `Packages/cn.etetet.yiuimcp` 的 Unity 项目的 CLI-f
 
 ## Workflow
 
+### 0. ⚠️ 第一步：扫描源码确认完整工具集（防遗漏）
+
+不要信这个文档的工具表是完整列表——包可能被更新。**先 grep 源码**：
+
+```powershell
+# 找到所有注册的 RPC 方法名
+search_content "[YIUIMCPTools" path="Packages/cn.etetet.yiuimcp/Editor/UnityMCP/Tools"
+
+# 找到所有 MenuItem 路径（可以直接 ExecuteMenu）
+search_content "MenuItem" path="Packages/cn.etetet.yiuimcp/Editor/UnityMCP/Tools"
+```
+
+用 `ListTools` RPC 也可以动态获知工具列表，但它是静态缓存，有新工具时未必即时更新，优先读源码。
+
 ### 1. 先确认当前工程支持这个 skill
 
 检查当前工作区里是否存在这些路径：
@@ -101,21 +115,60 @@ $base64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
 {"keyword":"编译完毕"}
 ```
 
-### 6. 了解当前真实可用的工具面
+### 6. 完整 RPC 工具参考表
 
-这个包当前暴露的 Unity 侧工具包括：
+通过 `POST http://127.0.0.1:3212/rpc` 调用。每个工具对应一个 `YIUIMCPTools` RPC 方法名。
 
-- `Log`
-- `LogError`
-- `EnterPlayMode`
-- `StopPlayMode`
-- `TriggerCompile`
-- `GetCompileResult`
-- `GetConsoleLog`
-- `ExecuteMenu`
-- `AssertConsoleContains`
+#### 常用工具
 
-不要假设 `ListTools` 已经实现。也不要把 UTO `/tools` 当成权威来源，因为它目前只返回最小静态列表。
+| RPC 方法名 | 功能 | MenuItem 路径 | 参数 | 典型值 |
+|---|---|---|---|---|
+| `TriggerCompile` | 触发编译 | (无) | `Force` (bool) | `{"Force":true}` |
+| `GetCompileResult` | 获取编译结果 | (无) | 无参数 | `{}` |
+| `GetConsoleLog` | 获取控制台日志 | (无) | `logType` (int), `logMaxCount` (int), `removeStackTrace` (bool) | `{"logType":0,"logMaxCount":50}` |
+| `ExecuteMenu` | 执行菜单命令 | (无) | `menuPath` (string) | `{"menuPath":"Tools/Run PlayMode Tests"}` |
+| `EnterPlayMode` | 进入运行模式 | (无) | 无参数 | `{}` |
+| `StopPlayMode` | 退出运行模式 | (无) | 无参数 | `{}` |
+| `Log` | 写日志到控制台 | (无) | `message` (string) | `{"message":"hello"}` |
+| `AssertConsoleContains` | 断言日志含关键词 | (无) | `keyword`, `keywordsJson`, `logType`, `useRegex`, `ignoreCase`, `matchAll`, `tailCount` | `{"keyword":"编译完毕"}` |
+
+#### 测试工具（本次扩展新增）
+
+| RPC 方法名 | 功能 | MenuItem 路径 | 参数 | 推荐链路 |
+|---|---|---|---|---|
+| `RunTestRunner` | 启动 Unity Test Runner 测试 | `Tools/Run PlayMode Tests` / `Tools/Run EditMode Tests` | `testMode` ("PlayMode"/"EditMode"), `outputPath` (可选) | → `WaitForTestResult` |
+| `WaitForTestResult` | 检查测试是否完成（未完成返回进度，让调用方 10s 后重试） | (无) | 无参数 | RunTestRunner 后调用 |
+| `GetTestResult` | 获取测试结果文件内容 | (无) | `resultFilePath` (可选), `testMode` (可选) | 测试完成后的最终查阅 |
+
+#### 排障工具
+
+| RPC 方法名 | 功能 | 说明 |
+|---|---|---|
+| `ListTools` | 输出所有注册工具的 name/description/inputSchema | ✅ **已实现** — 从 `YIUIMCPToolsRegistry` 动态反射 |
+
+#### Console logType 枚举值
+
+`GetConsoleLog` / `AssertConsoleContains` 的 `logType` 参数使用位标志整数值：
+
+| 值 | 含义 |
+|---|---|
+| `0` | `None` — 不匹配任何日志 |
+| `4` | `Log` — 普通日志 |
+| `1024` | `ScriptingLog` — 脚本日志 |
+| `4100` | `LogMask` (= Log \| ScriptingLog) — **默认值，常用** |
+| `128` | `AssetImportWarning` |
+| `512` | `ScriptingWarning` |
+| `4096` | `ScriptCompileWarning` |
+| `4736` | `WarningMask` — 所有警告 |
+| `1` | `Error` |
+| `2` | `Assert` |
+| `256` | `ScriptingError` |
+| `2048` | `ScriptCompileError` |
+| `131072` | `ScriptingException` |
+| `658699` | `ErrorMask` — 所有错误 |
+| `663835` | `All` — 所有类型 |
+
+**推荐用法**：检查错误用 `{"logType":658699}`，检查普通日志用 `{"logType":4100}`。
 
 ## 扩展 CLI 能力时怎么做
 
